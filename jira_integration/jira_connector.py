@@ -1,9 +1,4 @@
-import requests
-from requests.auth import HTTPBasicAuth
-import json
-from config.config import JIRA_EMAIL, JIRA_API_TOKEN, JIRA_URL
 
-# Jira Headers
 import requests
 from requests.auth import HTTPBasicAuth
 import json

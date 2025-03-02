@@ -4,6 +4,7 @@ from llm_chain.assistant import (
     assistant_get_issue_details,
     assistant_update_issue,
     assistant_add_comment,
+    handle_ask_about_issue, format_issues_response
 )
 from llm_chain.advanced import (
     assistant_search_issues,
@@ -14,11 +15,11 @@ from llm_chain.advanced import (
 from litellm import completion
 import re
 import threading
-
+import speech_recognition as sr
 from flask_cors import CORS
 
-
 app = Flask(__name__)
+
 
 def determine_intent(user_input):
     """
@@ -37,6 +38,10 @@ def determine_intent(user_input):
     - add_attachment
     - exit
 
+    Important:
+    - Return only the intent (e.g., "create_task") without additional text.
+    - Do not include any explanations or prefixes like "the intent of the user input is:".
+
     User input: {user_input}
     """
     try:
@@ -47,11 +52,11 @@ def determine_intent(user_input):
         )
         intent = response.choices[0].message.content.strip()
         intent = intent.lower().replace("the intent of the user input is:", "").strip()
+        print(f"Determined Intent: {intent}")  # Debugging
         return intent
     except Exception as e:
         print(f"Error determining intent: {e}")
         return None
-
 
 def extract_issue_key(user_input):
     """Extract the issue key (e.g., PROJ-123) from the user's input."""
@@ -113,9 +118,14 @@ def handle_user_input(user_input):
     elif intent == "add_comment":
         return handle_add_comment(user_input)
 
+
     elif intent == "search_issues":
+
         result = assistant_search_issues(user_input)
-        return result
+
+        if isinstance(result, str):  # If an error occurred
+            return format_issues_response(result)
+
 
     elif intent == "assign_issue":
         result = assistant_assign_issue(user_input)
@@ -129,11 +139,15 @@ def handle_user_input(user_input):
         result = assistant_add_attachment(user_input)
         return result
 
+    elif intent == "ask_about_issue":
+        return handle_ask_about_issue(user_input)
+
     elif intent == "exit":
         return "Thank you for using the Jira Assistant. Goodbye!"
 
     else:
         return "Sorry, I didn't understand that. Please try again."
+
 
 
 @app.route('/process-input', methods=['POST'])
@@ -152,14 +166,55 @@ def process_input():
 CORS(app, origins=["http://localhost:5173"])
 
 
+def correct_project_id(transcription):
+    """
+    Correct common misinterpretations of project IDs in the transcription.
+    """
+    # Replace common misinterpretations with the correct project ID
+    corrections = {
+        "are": "RA",
+        "our": "RA",
+        "are a": "RA",
+        "our a": "RA",
+    }
+
+    for wrong, correct in corrections.items():
+        transcription = re.sub(rf"\b{wrong}\b", correct, transcription, flags=re.IGNORECASE)
+
+    return transcription
+
+
+def transcribe_live_audio():
+    """Capture live audio from the microphone and transcribe it using SpeechRecognition."""
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening...")
+        audio = recognizer.listen(source)
+
+    try:
+        text = recognizer.recognize_google(audio)
+        # Correct common misinterpretations of project IDs
+        text = correct_project_id(text)
+        return text
+    except sr.UnknownValueError:
+        return "Sorry, I could not understand the audio."
+    except sr.RequestError:
+        return "Sorry, there was an issue with the speech recognition service."
+
+
 def start_terminal_chat():
-    """Allows chatting in the terminal while Flask is running."""
-    print("Chatbot is running in the terminal. Type 'exit' to quit.")
+    """Allows chatting in the terminal with voice input."""
+    print("Chatbot is running in the terminal. Type 'exit' to quit or say 'voice' to use voice input.")
     while True:
         user_input = input("You: ")
         if user_input.lower() == "exit":
             print("Goodbye!")
             break
+        elif user_input.lower() == "voice":
+            transcription = transcribe_live_audio()
+            print(f"You said: {transcription}")
+            user_input = transcription  # Use the transcribed text as input
+
         response = handle_user_input(user_input)
         print("Bot:", response)
 

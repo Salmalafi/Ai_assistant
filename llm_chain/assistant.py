@@ -2,6 +2,7 @@ import json
 import re
 from litellm import completion
 from jira_integration.jira_connector import create_jira_issue, get_issue, update_issue, add_comment
+from jira_integration.jira_search import jql_search
 
 # Load API token securely
 API_TOKEN = "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"
@@ -137,6 +138,8 @@ def assistant_create_jira_task(user_input):
     except Exception as e:
         print(f"Error creating Jira issue: {e}")  # Debugging
         return f"Error creating Jira issue: {str(e)}"
+
+# Function to retrieve issue details
 def assistant_get_issue_details(issue_key):
     """
     Retrieve details of a Jira issue.
@@ -216,3 +219,81 @@ def assistant_add_comment(issue_key, comment):
     except Exception as e:
         return f"Error adding comment to Jira issue: {str(e)}"
 
+# Function to query issues using JQL
+def handle_ask_about_issue(user_input):
+    """Handle user queries about issues by generating a JQL query and fetching results."""
+    # Generate a JQL query using the LLM
+    jql_query = generate_jql_query_from_groq(user_input)
+
+    if "Error" in jql_query:
+        return jql_query  # Return the error message
+
+    # Execute the JQL query
+    issues = jql_search(jql_query)
+
+    if isinstance(issues, str):  # If an error occurred
+        return issues
+    else:
+        return f"Found {len(issues)} issues: {json.dumps(issues, indent=2)}"
+
+# Function to generate a JQL query from Groq
+def generate_jql_query_from_groq(user_input):
+    """
+    Generate a JQL query based on user input using the Groq LLM.
+    """
+    try:
+        # Construct the prompt for Groq to generate the JQL query
+        prompt_text = f"Please generate a JQL query for Jira based on the following description: {user_input}"
+
+        # Use the provided `generate_response_with_groq` to get the JQL query from Groq model
+        jql_query = generate_response_with_groq(prompt_text)
+
+        # Return the generated JQL query
+        return jql_query
+    except Exception as e:
+        return f"Error generating JQL query: {str(e)}"
+
+def format_issues_response(issues):
+        """
+        Use the LLM to format a list of issues into a human-readable string.
+        """
+        if not issues:
+            return "No issues found."
+
+        # Convert the list of issues to a JSON string
+        issues_json = json.dumps(issues, indent=2)
+
+        # Construct the prompt for the LLM
+        prompt = f"""
+        You are a Jira assistant. Your task is to format a list of issues into a human-readable response for the user. The issues are provided in JSON format below:
+
+        Issues:
+        {issues_json}
+
+        Format the issues into a conversational response. Include the following details for each issue:
+        - Key (e.g., RA-123)
+        - Summary
+        - Assignee (if available)
+        - Status
+        - Priority (if available)
+
+        Example response:
+        "Here are the issues:
+        1. RA-123: Fix login bug (Assignee: John Doe, Status: Open, Priority: High)
+        2. RA-456: Update documentation (Assignee: Jane Smith, Status: In Progress, Priority: Medium)"
+
+        Now, generate the response for the provided issues.
+        """
+
+        try:
+            # Call the LLM to generate the formatted response
+            response = completion(
+                model="groq/llama-3.3-70b-versatile",  # Use your preferred LLM
+                messages=[{"content": prompt, "role": "user"}],
+                api_key="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",
+            )
+            formatted_response = response.choices[0].message.content.strip()
+            return formatted_response
+        except Exception as e:
+            print(f"Error formatting issues response: {e}")
+            return "Sorry, I couldn't format the issues. Please try again."
