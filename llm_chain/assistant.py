@@ -1,11 +1,17 @@
 import json
 import re
 from litellm import completion
+from requests.auth import HTTPBasicAuth
 from jira_integration.jira_connector import create_jira_issue, get_issue, update_issue, add_comment
 from jira_integration.jira_search import jql_search
-
+from config.config  import JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN
+import requests
 # Load API token securely
 API_TOKEN = "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"
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
 
 # Function to call Groq API for text generation using LiteLLM
 def generate_response_with_groq(prompt_text):
@@ -297,3 +303,265 @@ def format_issues_response(issues):
         except Exception as e:
             print(f"Error formatting issues response: {e}")
             return "Sorry, I couldn't format the issues. Please try again."
+def find_board_id_by_project_name(project_name):
+    """
+    Find the board ID using the project name by filtering boards with query parameters.
+
+    :param project_name: The project name to search for (filters board by name).
+    :return: The ID of the board associated with the project name, or an error message.
+    """
+    try:
+        # URL to fetch boards with filtering by name
+        url = f"{JIRA_URL}/rest/agile/1.0/board"
+        # Passing the name as a query parameter to filter results
+        params = {"name": project_name}
+
+        # Make the request to Jira API
+        response = requests.get(url, headers=HEADERS, params=params ,  auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN))
+
+        if response.status_code == 200:
+            # Parse the response
+            boards = response.json().get("values", [])
+            if not boards:
+                return f"Error: No board found for the project '{project_name}'."
+
+            # Return the ID of the first matching board
+            return boards[0]["id"]
+
+        elif response.status_code == 401:
+            return "Error: Unauthorized. Check your API token and email credentials."
+
+        else:
+            return f"Error fetching boards: {response.status_code}. Details: {response.text}"
+
+    except Exception as e:
+        return f"Error while finding board ID: {str(e)}"
+
+# Function to debug network request
+def debug_request(url, headers, params=None):
+    """
+    Print the details of the request for debugging.
+    """
+    print(f"URL: {url}")
+    print(f"Headers: {headers}")
+    if params:
+        print(f"Query Parameters: {params}")
+
+# Function to retrieve sprints for a specific board
+def get_sprints_for_board(board_id):
+    """
+    Retrieve sprints for the specified board ID.
+    """
+    url = f"{JIRA_URL}/rest/agile/1.0/board/{board_id}/sprint"
+
+    response = requests.get(url,  headers=HEADERS,  auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN))
+    if response.status_code == 200:
+        sprints = response.json().get("values", [])
+        return sprints  # List of sprints
+    elif response.status_code == 401:
+        print("Error: Unauthorized. Check your credentials.")
+        return []
+    else:
+        print(f"Error fetching sprints: {response.status_code}. Details: {response.text}")
+        return []
+# Function to generate insights from retrieved sprints
+def generate_sprint_insights(sprints):
+    """
+    Generate well-formatted insights for the retrieved sprints in bullet point format.
+    """
+    if not sprints:
+        return "No sprints available."
+
+    insights = []
+    for sprint in sprints:
+        # Extract relevant details with defaults
+        name = sprint.get("name", "Unknown")
+        state = sprint.get("state", "Unknown")  # e.g., active, closed, future
+        start_date = sprint.get("startDate", "N/A")
+        end_date = sprint.get("endDate", "N/A")
+        complete_date = sprint.get("completeDate", "N/A")
+
+        # Create a formatted string for the sprint
+        insight = (
+            f"- **Sprint Name**: {name}\n"
+            f"  - **State**: {state}\n"
+            f"  - **Start Date**: {start_date}\n"
+            f"  - **End Date**: {end_date}\n"
+            f"  - **Complete Date**: {complete_date}\n"
+
+        )
+        insights.append(insight)
+
+    # Combine all insights into a single string
+    return "\n".join(insights)
+
+def get_sprints_by_state(board_id, states):
+    """
+    Retrieve sprints for a given board ID filtered by specified state(s).
+
+    :param board_id: The ID of the board linked to the project.
+    :param states: A comma-separated string of sprint states, e.g., "active", "future", "closed".
+    :return: A list of sprints based on the state(s) provided, or an error message if no matching sprints are found.
+    """
+    try:
+        # URL for fetching sprints based on state
+        url = f"{JIRA_URL}/rest/agile/1.0/board/{board_id}/sprint"
+        params = {"state": states}  # Query parameter for sprint states
+        response = requests.get(url, headers=HEADERS, params=params ,  auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN))
+
+        if response.status_code == 200:
+            sprints = response.json().get("values", [])
+            if not sprints:
+                return f"No sprints found for the given state(s): {states}."
+
+            return sprints
+
+        elif response.status_code == 401:
+            return "Error: Unauthorized. Check your API token and email credentials."
+
+        else:
+            return f"Error fetching sprints: {response.status_code}. Details: {response.text}"
+
+    except Exception as e:
+        return f"Error while fetching sprints by state: {str(e)}"
+
+
+def get_issues_by_sprint_state(project_name, sprint_state):
+    """
+    Retrieve issues for a sprint in a given project dynamically based on sprint state.
+
+    :param project_name: The name of the project to retrieve the board and sprint from.
+    :param sprint_state: The state of the sprint to fetch (e.g., "current", "future", "past").
+    :return: A formatted string summarizing the issues found in the filtered sprint, or an error message.
+    """
+    try:
+        # Step 1: Map user-friendly sprint state to valid Jira API states
+        state_mapping = {
+            "current": "active",
+            "future": "future",
+            "past": "closed"
+        }
+        jira_state = state_mapping.get(sprint_state.lower(), "active")  # Default to "active"
+
+        # Step 2: Get the Board ID from the Project Name
+        board_id = find_board_id_by_project_name(project_name)
+        if isinstance(board_id, str):  # Catch error messages
+            return board_id
+
+        # Step 3: Get Sprints for the Board by State
+        sprints = get_sprints_by_state(board_id, jira_state)
+        if isinstance(sprints, str):  # Catch error messages
+            return sprints
+
+        # Step 4: Retrieve Issues for the First Matched Sprint
+        selected_sprint = sprints[0] if sprints else None
+        if not selected_sprint:
+            return f"No sprints found with the state '{sprint_state}'."
+
+        sprint_id = selected_sprint["id"]
+        sprint_name = selected_sprint["name"]
+
+        # Fetch issues for the selected sprint
+        issues = get_issues_in_sprint(sprint_id, board_id)
+        if isinstance(issues, str):  # Catch error messages
+            return issues
+
+        # Step 5: Format issues for better readability
+        formatted = [f"**Sprint Name**: {sprint_name} ({sprint_state.capitalize()})\n"]
+        for issue in issues:
+            formatted.append(
+                f"- **{issue['Key']}**: {issue['Summary']}\n"
+                f"  - Status: {issue['Status']}\n"
+                f"  - Assignee: {issue['Assignee']}\n"
+            )
+        return "\n".join(formatted)
+
+    except Exception as e:
+        return f"Error while fetching issues by sprint state: {str(e)}"
+
+def get_issues_in_sprint(boardid, sprintid):
+    """
+    Retrieves issues from a specific sprint using the board ID and sprint ID.
+
+    :param boardid: The ID of the board associated with the sprint.
+    :param sprintid: The ID of the sprint from which to fetch issues.
+    :return: A list of issues in the sprint or an error message.
+    """
+    try:
+        # Step 1: Validate parameters
+        if not boardid or not sprintid:
+            return "Error: Both board ID and sprint ID are required to fetch issues."
+
+        # Step 2: Construct the URL for the Jira API
+        url = f"{JIRA_URL}/rest/agile/1.0/sprint/{sprintid}/issue"
+
+        # Step 3: Make the HTTP GET request
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        )
+
+        # Check for HTTP errors
+        if response.status_code != 200:
+            return f"Error: Unable to fetch issues. HTTP Status: {response.status_code}, Response: {response.text}"
+
+        # Parse JSON response
+        response_data = response.json()
+        issues = response_data.get("issues", [])
+        print(f"Raw Issues Data: {issues}")  # Debugging
+
+        if not issues:
+            return f"No issues found for sprint ID '{sprintid}' on board ID '{boardid}'."
+
+        # Format and return issues
+        formatted_issues = []
+        for issue in issues:
+            if not issue or not isinstance(issue, dict):  # Handle invalid issue data
+                formatted_issues.append({
+                    "Key": "Invalid Issue",
+                    "Summary": "Invalid Issue Data",
+                    "Status": "Invalid",
+                    "Assignee": "Unknown"
+                })
+                continue
+
+            fields = issue.get("fields", {})  # Safe access for 'fields'
+            status = fields.get("status", {})  # Safe access for 'status'
+            assignee = fields.get("assignee", {})  # Safe access for 'assignee'
+
+            formatted_issues.append({
+                "Key": issue.get("key", "Unknown Issue Key"),
+                "Summary": fields.get("summary", "No Summary Available"),
+                "Status": status.get("name", "Unknown Status"),
+                "Assignee": assignee.get("displayName", "Unassigned")
+            })
+
+        return formatted_issues
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()  # Optional: Print full traceback for debugging
+        return f"An error occurred while fetching issues in sprint: {str(e)}"
+
+
+def format_sprint_issues(sprint_name, sprint_state, issues):
+    """
+    Formats a list of sprint issues into a human-readable string.
+
+    :param sprint_name: Name of the sprint.
+    :param sprint_state: State of the sprint (e.g., current, future, past).
+    :param issues: List of issues with their details (Key, Summary, Status, Assignee).
+    :return: A formatted string summarizing the issues.
+    """
+    output = [f"**Sprint Name**: {sprint_name} ({sprint_state.capitalize()})",
+              "=================================================="]
+
+    for issue in issues:
+        output.append(f"- **{issue['Key']}**: {issue['Summary']}")
+        output.append(f"  - **Status**: {issue['Status']}")
+        output.append(f"  - **Assignee**: {issue['Assignee']}")
+        output.append("--------------------------------------------------")
+
+    return "\n".join(output)
+
