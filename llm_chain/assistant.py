@@ -7,11 +7,14 @@ from jira_integration.jira_search import jql_search
 from config.config  import JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN
 import requests
 # Load API token securely
-API_TOKEN = "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"
+import os
+
+API_TOKEN = os.getenv("GROQ_API_TOKEN")
 HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json"
 }
+
 
 # Function to call Groq API for text generation using LiteLLM
 def generate_response_with_groq(prompt_text):
@@ -296,7 +299,7 @@ def format_issues_response(issues):
             response = completion(
                 model="groq/llama-3.3-70b-versatile",  # Use your preferred LLM
                 messages=[{"content": prompt, "role": "user"}],
-                api_key="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",
+                api_key=API_TOKEN,
             )
             formatted_response = response.choices[0].message.content.strip()
             return formatted_response
@@ -565,3 +568,253 @@ def format_sprint_issues(sprint_name, sprint_state, issues):
 
     return "\n".join(output)
 
+
+def get_issues_assigned_to_me():
+    """
+    Retrieves Jira issues assigned to the current user using JQL query.
+    :return: A list of issues assigned to the user or an error message.
+    """
+    try:
+        # Construct the JQL query
+        jql_query = f"assignee = \"{JIRA_EMAIL}\""
+
+        # Jira API URL - search endpoint
+        url = f"{JIRA_URL}/rest/api/3/search"
+
+        # API parameters
+        params = {
+            "jql": jql_query,
+            "fields": "key,summary,status,priority,duedate",  # Fetch only required fields
+            "maxResults": 100
+        }
+
+        # Send the GET request
+        response = requests.get(url, headers=HEADERS, params=params,
+                                auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN))
+        # Check if the request was successful
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Error: HTTP {response.status_code}, Response: {response.text}",
+                "tasks": []
+            }
+        # Safely parse the response
+        response_data = response.json()  # Will raise exception if not valid JSON
+        issues = response_data.get("issues", [])  # Default to empty list if "issues" doesn't exist
+        # Ensure issues is a list
+        if not isinstance(issues, list):
+            return {
+                "success": False,
+                "message": "Invalid response format. 'issues' is not a list.",
+                "tasks": []
+            }
+        # Process and format issues
+        formatted_issues = []
+        for issue in issues:
+            fields = issue.get("fields", {})
+            formatted_issues.append({
+                "issue_key": issue.get("key", "N/A"),
+                "summary": fields.get("summary", "No Summary"),
+                "status": fields.get("status", {}).get("name", "Unknown"),
+                "priority": fields.get("priority", {}).get("name", "No Priority"),
+                "due_date": fields.get("duedate", "No Due Date")
+            })
+        # Return successfully retrieved tasks
+        return {
+            "success": True,
+            "message": "Tasks successfully retrieved.",
+            "tasks": formatted_issues
+        }
+
+    except Exception as e:
+        # Handle any unexpected failures
+        return {
+            "success": False,
+            "message": f"An error occurred while retrieving tasks: {str(e)}",
+            "tasks": []
+        }
+
+
+def extract_assignee_name(user_input):
+    """
+    Extracts the assignee's name from the user's input.
+    :param user_input: The input text from the user.
+    :return: The extracted name of the assignee, if found.
+    """
+    # Example logic: Look for the phrase "to <name>" in the input
+    if " to " in user_input:
+        return user_input.split(" to ")[-1].strip()
+
+    # If "to" isn't present, assume no assignee was mentioned
+    return None
+
+def assign_issue_to_user(issue_key, assignee_name):
+    """
+    Assigns an issue to a user in the system using the Jira API.
+
+    Args:
+        issue_key (str): The unique identifier of the issue to be assigned.
+        assignee_name (str): The name of the user to whom the issue will be assigned.
+
+    Returns:
+        str: A message indicating whether the assignment was successful or not.
+    """
+    try:
+        # Find the assignee's account ID
+        assignee_account_id = get_assignee_account_id(assignee_name)
+        if not assignee_account_id:
+            return f"User '{assignee_name}' not found in the system. Please check the name and try again."
+
+        # Jira API endpoint for assigning tasks
+        url = f"{JIRA_URL}/rest/api/3/issue/{issue_key}/assignee"
+
+        # Payload for assigning the task
+        payload = {"accountId": assignee_account_id}
+
+        # Make the API request to assign the issue
+        response = requests.put(
+            url,
+            headers=HEADERS,
+            json=payload,
+            auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        )
+
+        # Handle the Jira API response
+        if response.status_code == 204:
+            return f"Issue '{issue_key}' successfully assigned to '{assignee_name}'."
+        else:
+            return f"Failed to assign issue '{issue_key}'. API returned error: {response.status_code} - {response.text}"
+    except Exception as e:
+        return f"An unexpected error occurred while assigning the task: {str(e)}"
+
+
+def get_assignee_account_id(assignee_name):
+    """
+    Resolves a user's Atlassian account ID based on their display name using the Jira API.
+
+
+    Args:
+        assignee_name (str): The display name of the user.
+
+    Returns:
+        str: The account ID of the user if found, or None if the user does not exist.
+    """
+    try:
+        # Jira API endpoint to search for users
+        url = f"{JIRA_URL}/rest/api/3/user/search"
+        params = {"query": assignee_name}
+
+        # Send the GET request to search for the user
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        )
+        # Validate the response
+        if response.status_code == 200:
+            users = response.json()
+            for user in users:
+                # Compare displayNames (case-insensitive)
+                if user.get("displayName", "").lower() == assignee_name.lower():
+                    return user.get("accountId")  # Return the account ID of the user
+            return None  # No matching user found
+        else:
+            print(f"[ERROR] Failed to fetch user data: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"[ERROR] An error occurred while resolving user account ID: {e}")
+        return None
+
+def validate_assignee(assignee_name):
+    """
+    Validates if the assignee exists in the Jira system.
+
+    Args:
+        assignee_name (str): The assignee's name to validate.
+
+    Returns:
+        bool: True if the assignee is valid/existing in the system, False otherwise.
+    """
+    try:
+        # Jira API endpoint to search for users
+        url = f"{JIRA_URL}/rest/api/3/user/search"
+        params = {"query": assignee_name}  # Search query (Jira matches on display name, email, etc.)
+
+        # Perform the GET request to search for the user
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params=params,
+            auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        )
+        # Check if the response is successful
+        if response.status_code == 200:
+            users = response.json()
+            for user in users:
+                # Compare displayNames (case-insensitive search)
+                if user.get("displayName", "").lower() == assignee_name.lower():
+                    return True  # User found in the system
+            return False  # No matching user found
+        else:
+            print(f"[ERROR] Failed to fetch user data: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"[ERROR] An error occurred during user validation: {e}")
+        return False
+
+def get_issue_key_from_jira(description):
+    """
+    Retrieves the issue key from Jira based on the issue description or other fields.
+
+    Args:
+        description (str): The keywords or text to search for in Jira.
+
+    Returns:
+        str: The issue key if found, or None if no matching issue is found.
+    """
+    # Escape double quotes in the description to avoid JQL syntax issues
+    description = description.replace('"', '\\"')
+
+    # Define the JQL query
+    query = {
+        "jql": f'text ~ "{description}"',  # Match any indexed field (summary, description, etc.)
+        "fields": ["key", "summary", "description"],  # Retrieve specific fields
+        "maxResults": 1,  # Fetch only one result
+    }
+    # Jira Search API URL
+    url = f"{JIRA_URL}/rest/api/3/search"  # Replace JIRA_URL with your Jira instance base URL
+    try:
+        # Send the POST request to Jira's search endpoint
+        response = requests.post(
+            url,
+            headers=HEADERS,  # Ensure HEADERS includes valid Authorization and Content-Type
+            json=query,  # Send JSON payload
+            auth=HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN),  # Jira Email and API Token for authentication
+        )
+
+        # Raise an HTTP error if one occurred
+        response.raise_for_status()
+
+        # Parse the response JSON
+        data = response.json()
+        print(f"API Response: {data}")  # Debugging: View the entire response
+
+        # Check if any issues were returned
+        issues = data.get("issues", [])
+        if issues:
+            # Get the key of the first matching issue
+            issue = issues[0]
+            issue_key = issue.get("key")
+            print(f"Found Issue: Key = {issue_key}")
+            return issue_key
+
+        # No matching issues found
+        print("No issues matched the given query.")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        # Handle errors (HTTP or connection issues)
+        print(f"Error fetching data from Jira: {e}")
+        return None

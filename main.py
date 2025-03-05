@@ -7,7 +7,8 @@ from llm_chain.assistant import (
     assistant_update_issue,
     assistant_add_comment,
     handle_ask_about_issue, format_issues_response ,get_issues_in_sprint, find_board_id_by_project_name, get_sprints_for_board, generate_sprint_insights, get_sprints_by_state,
-format_sprint_issues
+format_sprint_issues, get_issues_assigned_to_me, assign_issue_to_user, validate_assignee,get_issue_key_from_jira
+
 )
 from llm_chain.advanced import (
     assistant_search_issues,
@@ -40,6 +41,7 @@ def determine_intent(user_input):
     - transition_issue
     - ask_about_sprint
     - add_attachment
+    - tasks_assigned_to_me
     - ask_about_sprint_issues
     - exit
 
@@ -64,9 +66,65 @@ def determine_intent(user_input):
         return None
 
 def extract_issue_key(user_input):
-    """Extract the issue key (e.g., PROJ-123) from the user's input."""
-    match = re.search(r"[A-Z]{2,}-\d+", user_input)
-    return match.group(0) if match else None
+    """
+    Extracts the issue key from the user input based on its description.
+
+    Args:
+        user_input (str): The input string potentially containing an issue description.
+
+    Returns:
+        str: The extracted issue key, or None if not found.
+    """
+    try:
+        # Simulate retrieving issues from a system (e.g., data from a Jira project or database)
+        issues = {
+            "PROJ-101": "Fix the login button not working on mobile devices",
+            "PROJ-102": "Create a new user onboarding flow",
+            "PROJ-103": "Update the API documentation for better clarity"
+        }
+
+        # Iterate through issues to find a match in the description
+        for issue_key, description in issues.items():
+            if description.lower() in user_input.lower():
+                return issue_key
+        return None  # No match found
+    except Exception as e:
+        print(f"Error extracting issue key: {e}")
+        return None
+
+
+def handle_assign_issue(user_input):
+    """
+    Handles the assignment of an issue to a user based on the input.
+
+    Args:
+        user_input (str): The input string containing information about the issue description and assignee.
+
+    Returns:
+        str: A response indicating the success or failure of the assignment.
+    """
+    try:
+        # Extract the issue key based on the description within the user input
+        description=extract_issue_description(user_input)
+        issue_key = get_issue_key_from_jira(description)
+        if not issue_key:
+            return "Could not identify the issue from the description provided. Please provide a valid issue description."
+
+        # Extract the assignee's name from the input
+        assignee_name = extract_assignee_from_input(user_input)
+        if not assignee_name:
+            return "Could not determine the assignee's name from the input. Please provide a valid user."
+
+        # Perform the issue assignment (e.g., calling an API or updating the database/system)
+        success = assign_issue_to_user(issue_key, assignee_name)
+        if success:
+            return f"Issue '{issue_key}' has been successfully assigned to '{assignee_name}'."
+        else:
+            return f"Failed to assign issue '{issue_key}' to '{assignee_name}'. Please try again later."
+    except Exception as e:
+        # Handle unexpected errors
+        return f"An error occurred while assigning the issue: {str(e)}"
+
 
 
 def extract_comment(user_input):
@@ -123,7 +181,7 @@ def handle_user_input(user_input):
         if isinstance(result, str):  # If an error occurred
             return format_issues_response(result)
     elif intent == "assign_issue":
-        result = assistant_assign_issue(user_input)
+        result = handle_assign_issue(user_input)
         return result
     elif intent == "transition_issue":
         result = assistant_transition_issue(user_input)
@@ -137,6 +195,8 @@ def handle_user_input(user_input):
         return handle_ask_about_sprint(user_input)
     elif intent=="ask_about_sprint_issues":
         return handle_ask_about_sprint_issues(user_input)
+    elif intent=="tasks_assigned_to_me":
+        return handle_tasks_assigned_to_me()
     elif intent == "exit":
         return "Thank you for using the Jira Assistant. Goodbye!"
     else:
@@ -174,8 +234,6 @@ def correct_project_id(transcription):
         transcription = re.sub(rf"\b{wrong}\b", correct, transcription, flags=re.IGNORECASE)
 
     return transcription
-
-
 def transcribe_live_audio():
     """Capture live audio from the microphone and transcribe it using SpeechRecognition."""
     recognizer = sr.Recognizer()
@@ -252,7 +310,6 @@ def extract_sprint_state_from_input(user_input):
     except Exception as e:
         return f"An error occurred while extracting sprint state: {str(e)}"
 
-
 def start_terminal_chat():
     """Allows chatting in the terminal with voice input."""
     print("Chatbot is running in the terminal. Type 'exit' to quit or say 'voice' to use voice input.")
@@ -282,9 +339,6 @@ def handle_ask_about_sprint_issues(user_input):
         # Extract the project name and sprint state from the user's input
         project_name = extract_project_name_from_input(user_input)
         sprint_state = extract_sprint_state_from_input(user_input)
-
-        print(f"Project Name Extracted: {project_name}")  # Debugging
-        print(f"Sprint State Extracted: {sprint_state}")  # Debugging
 
         if not project_name:
             return "Error: No project name or ID found in your input."
@@ -379,6 +433,124 @@ def extract_project_name_from_input(user_input):
     except Exception as e:
         print(f"Error while extracting project name: {e}")
         return None
+def handle_tasks_assigned_to_me():
+    """
+    Retrieves and processes a list of tasks assigned to the given user.
+
+    :return: A structured response containing the list of tasks or an error message.
+    """
+    try:
+        # Step 1: Retrieve issues assigned to the user
+        assigned_issues = get_issues_assigned_to_me()
+
+        # Safeguard against failures
+        if not assigned_issues["success"]:
+            return {
+                "success": False,
+                "message": assigned_issues["message"],
+                "tasks": []
+            }
+
+        # Step 2: Use format_tasks to simplify and standardize the structure
+        formatted_issues = format_tasks(assigned_issues["tasks"])
+        return formatted_issues
+    except Exception as e:
+        # Handle any unexpected errors gracefully
+        return {
+            "success": False,
+            "message": f"An error occurred while processing tasks: {str(e)}",
+            "tasks": []
+        }
+
+def extract_issue_description(user_input):
+    """
+    Extracts the issue description from the user input. The issue key will be retrieved separately via the Jira API.
+
+    Args:
+        user_input (str): The input string potentially containing an issue description.
+
+    Returns:
+        str: The extracted issue description, or None if no description is found.
+    """
+    # Define a prompt for the LLM to extract the description
+    prompt = f"""
+    From the following user input, extract only the issue's description.
+    Assume the description mentions the task or issue in natural language.
+    User Input: "{user_input}"
+    Output: Provide only the description of the issue or 'None' if no valid description exists in the input.
+    """
+    try:
+        # Use the LLM to extract the description
+        response = completion(
+            model="groq/llama-3.3-70b-versatile",  # Replace with the desired LLM model
+            messages=[{"content": prompt, "role": "user"}],
+            api_key="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",  # Replace with your valid API key
+        )
+
+        # Parse the response from the LLM
+        issue_description = response.choices[0].message.content.strip()
+        # Return the description or None if "None" is returned
+        return issue_description if issue_description.lower() != "none" else None
+
+    except Exception as e:
+        # Handle errors and return None if the extraction fails
+        print(f"Error extracting issue description: {e}")
+        return None
+
+def extract_assignee_from_input(user_input):
+    """
+    Extracts the assignee's name from the user input using a Groq-supported LLaMA model.
+
+    Args:
+        user_input (str): The input string.
+
+    Returns:
+        str: The extracted assignee name, or None if not found.
+    """
+    # Define the prompt for extracting the assignee's name
+    prompt = f"""
+    Extract the assignee's name from the following input:
+    User Input: "{user_input}"
+    Output: Provide only the name of the person to whom the task is being assigned, or 'None' if no name can be identified.
+    Please don't give any code just the name of the person.
+    """
+
+    try:
+        # Use the LLaMA model for inferencel
+        response = completion(
+            model="groq/llama-3.3-70b-versatile",  # Replace with your preferred Groq-supported LLaMA model
+            messages=[{"content": prompt, "role": "user"}],
+            api_key="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",  # Replace with your API key
+        )
+
+        # Extract the model's response
+        extracted_name = response.choices[0].message.content.strip()
+
+        # Clean and return the extracted name
+        if extracted_name.lower() == "none":
+            return None
+        return extracted_name
+
+    except Exception as e:
+        print(f"Error extracting assignee: {e}")
+        return None
+def format_tasks(issues):
+    """
+    Formats a list of issues into a human-readable string.
+
+    :param issues: List of issues with their details (Key, Summary, Status, Priority, Due Date).
+    :return: A formatted string summarizing the issues.
+    """
+    output = ["**Assigned Issues**", "=================================================="]
+
+    for issue in issues:
+        output.append(f"- **{issue['issue_key']}**: {issue['summary']}")
+        output.append(f"  - **Status**: {issue['status']}")
+        output.append(f"  - **Priority**: {issue['priority']}")
+        output.append(f"  - **Due Date**: {issue['due_date']}")
+        output.append("--------------------------------------------------")
+
+    return "\n".join(output)
 
 
 if __name__ == "__main__":
